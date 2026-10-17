@@ -61,16 +61,19 @@ as a semaphore).
 Python. Reimplementing model loading and tokenization in Go would be weeks of
 work to end up with something worse.
 
-**Split vs. monolithic.** A single Go binary that embeds a model via CGo is
+**Split vs. monolithic.** - A single Go binary that embeds a model via CGo is
 possible but painful (build complexity, no GPU acceleration on MPS through CGo).
 A single Python service with FastAPI would put all the HTTP handling and SQL
-logic in Python, which I wanted to avoid — Go's stdlib HTTP and database/sql are
+logic in Python, which I wanted to avoid thus Go's stdlib HTTP and database/sql are
 better fits than Python's equivalents for this kind of service.
 
-The tradeoff is operational complexity: two processes, two languages, and the
-Go server has to manage the Python child's lifecycle. For a demo, this is fine.
-For production, they'd be separate containers, and the Go server would just
-hit `EMBEDDING_SERVICE_URL`.
+The tradeoff is operational complexity.
+
+> [!NOTE]
+> Seperation of both the models, and the services also provides the benefit of debugging the two seperately, or running the embedding service independent of each the go program, which is extremely useful as it means that if only the model is problematic, to be changed, or any other improvements, it can be tested and ran seperately.
+> It also shows both the frameworks running in their best suited environments, and performing extremely well, one in pythons and transformers while the other in go processes.
+
+Ofcourse, please be careful of port conflict errors, running the two seperately while possible is also to be careful to not spin them both at the same time.
 
 ---
 
