@@ -1,3 +1,14 @@
 cars.db
 data/vehicles.csv
-
+*.db
+*.db.*.bak
+cars.db*
+service.venv/
+redundant/
+.vscode/
+.idea/
+*.swp
+__pycache__/
+*.pyc
+.DS_Store
+.cache/
