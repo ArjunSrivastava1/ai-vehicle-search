@@ -8,6 +8,9 @@ func Run(d *sql.DB, f Filter) ([]Vehicle, error) {
 	if f.Limit <= 0 || f.Limit > 50 {
 		f.Limit = 10
 	}
+	if f.Offset < 0 {
+		f.Offset = 0
+	}
 	rows, err := fetch(d, f)
 	if err != nil {
 		return nil, err
@@ -23,6 +26,9 @@ func Run(d *sql.DB, f Filter) ([]Vehicle, error) {
 func RunSemantic(d *sql.DB, f Filter, query string) ([]Vehicle, error) {
 	if f.Limit <= 0 || f.Limit > 50 {
 		f.Limit = 10
+	}
+	if f.Offset < 0 {
+		f.Offset = 0
 	}
 	rows, err := fetch(d, f)
 	if err != nil {

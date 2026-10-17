@@ -668,5 +668,32 @@
     "body_type": "SUV",
     "seats": 5,
     "safety_rating": 3
-  }
+  },
+
+"ritz":        {"body_type": "Hatchback", "seats": 5, "safety_rating": 2},
+"eon":         {"body_type": "Hatchback", "seats": 5, "safety_rating": 2},
+"kwid":        {"body_type": "Hatchback", "seats": 5, "safety_rating": 2},
+"beat":        {"body_type": "Hatchback", "seats": 5, "safety_rating": 2},
+"celerio":     {"body_type": "Hatchback", "seats": 5, "safety_rating": 3},
+"figo":        {"body_type": "Hatchback", "seats": 5, "safety_rating": 3},
+"800":         {"body_type": "Hatchback", "seats": 4, "safety_rating": 1},
+"tuv":         {"body_type": "SUV", "seats": 7, "safety_rating": 3},
+"tuv300":      {"body_type": "SUV", "seats": 7, "safety_rating": 3},
+"brezza":      {"body_type": "SUV", "seats": 5, "safety_rating": 4},
+"ertiga":      {"body_type": "MPV", "seats": 7, "safety_rating": 3},
+"x4":          {"body_type": "SUV", "seats": 5, "safety_rating": 4},
+"es":          {"body_type": "Sedan", "seats": 5, "safety_rating": 5},
+"xf":          {"body_type": "Sedan", "seats": 5, "safety_rating": 5},
+"camry":       {"body_type": "Sedan", "seats": 5, "safety_rating": 5},
+"rapid":       {"body_type": "Sedan", "seats": 5, "safety_rating": 4},
+"vento":       {"body_type": "Sedan", "seats": 5, "safety_rating": 4},
+"xc40":        {"body_type": "SUV", "seats": 5, "safety_rating": 5},
+"xe":          {"body_type": "Sedan", "seats": 5, "safety_rating": 5},
+"v40":         {"body_type": "Sedan", "seats": 5, "safety_rating": 5},
+"bmwx4":  {"body_type": "SUV", "seats": 5, "safety_rating": 4},
+"jaguar": {"body_type": "Sedan", "seats": 5, "safety_rating": 5},
+"jaguarxf": {"body_type": "Sedan", "seats": 5, "safety_rating": 5},
+"volvoxc40": {"body_type": "SUV", "seats": 5, "safety_rating": 5},
+"volvov40":  {"body_type": "Sedan", "seats": 5, "safety_rating": 5},
+"lexus":     {"body_type": "Sedan", "seats": 5, "safety_rating": 5}
 }

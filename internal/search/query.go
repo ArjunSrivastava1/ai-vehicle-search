@@ -2,7 +2,6 @@ package search
 
 import (
 	"database/sql"
-	"fmt"
 	"strings"
 )
 
@@ -11,18 +10,39 @@ func fetch(d *sql.DB, f Filter) ([]Vehicle, error) {
 		where []string
 		args  []any
 	)
+
 	if f.Fuel != "" {
-		where = append(where, "fuel = ?")
+		where = append(where, "fuel = ? COLLATE NOCASE")
 		args = append(args, f.Fuel)
 	}
+
 	if f.Transmission != "" {
-		where = append(where, "transmission = ?")
-		args = append(args, f.Transmission)
+		// AMT is an automated manual — treat it as "automatic" for user queries,
+		// since that's what "automatic" means in practice on the Indian market.
+		if strings.EqualFold(f.Transmission, "automatic") {
+			where = append(where, "(transmission = ? COLLATE NOCASE OR transmission = ? COLLATE NOCASE)")
+			args = append(args, "automatic", "amt")
+		} else {
+			where = append(where, "transmission = ? COLLATE NOCASE")
+			args = append(args, f.Transmission)
+		}
 	}
+
 	if f.BodyType != "" {
-		where = append(where, "body_type = ?")
+		where = append(where, "body_type = ? COLLATE NOCASE")
 		args = append(args, f.BodyType)
 	}
+
+	if f.YearMin != nil {
+		where = append(where, "year >= ?")
+		args = append(args, *f.YearMin)
+	}
+
+	if f.YearMax != nil {
+		where = append(where, "year <= ?")
+		args = append(args, *f.YearMax)
+	}
+
 	if f.PriceMin != nil {
 		where = append(where, "selling_price >= ?")
 		args = append(args, *f.PriceMin)
@@ -44,13 +64,16 @@ func fetch(d *sql.DB, f Filter) ([]Vehicle, error) {
 		args = append(args, *f.SafetyMin)
 	}
 
-	q := "SELECT id, name, year, selling_price, km_driven, fuel, transmission, " +
+	q := "SELECT MIN(id), name, year, selling_price, km_driven, fuel, transmission, " +
 		"COALESCE(seller_type,''), COALESCE(owner,''), COALESCE(body_type,''), " +
 		"COALESCE(seats,0), COALESCE(safety_rating,0) FROM vehicles"
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
-	q += " LIMIT 500" // hard cap before ranking
+	q += " GROUP BY name, year, selling_price, km_driven, fuel, transmission, " +
+		"COALESCE(seller_type,''), COALESCE(owner,''), COALESCE(body_type,''), " +
+		"COALESCE(seats,0), COALESCE(safety_rating,0)"
+	q += " ORDER BY year DESC, selling_price ASC LIMIT 100"
 
 	rows, err := d.Query(q, args...)
 	if err != nil {
@@ -58,7 +81,8 @@ func fetch(d *sql.DB, f Filter) ([]Vehicle, error) {
 	}
 	defer rows.Close()
 
-	var out []Vehicle
+	// Initialize as empty slice so JSON serialization gives [] not null.
+	out := []Vehicle{}
 	for rows.Next() {
 		var v Vehicle
 		if err := rows.Scan(&v.ID, &v.Name, &v.Year, &v.SellingPrice, &v.KMDriven,
@@ -68,9 +92,8 @@ func fetch(d *sql.DB, f Filter) ([]Vehicle, error) {
 		}
 		out = append(out, v)
 	}
-	if len(out) == 0 {
-		return out, nil
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
-	_ = fmt.Sprint // placeholder if you extend
 	return out, nil
 }

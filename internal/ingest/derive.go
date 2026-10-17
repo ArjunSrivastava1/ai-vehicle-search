@@ -14,31 +14,49 @@ type Derived struct {
 
 type Lookup map[string]Derived
 
+// normalizeName lowercases and strips spaces, hyphens, and underscores.
+// Both the CSV vehicle names and the lookup keys are run through this so
+// that "Maruti Wagon R LXI" matches the lookup key "wagon-r".
+func normalizeName(s string) string {
+	s = strings.ToLower(s)
+	s = strings.NewReplacer(" ", "", "-", "", "_", "").Replace(s)
+	return s
+}
+
 func LoadLookup(path string) (Lookup, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var l Lookup
-	if err := json.Unmarshal(b, &l); err != nil {
+	var raw Lookup
+	if err := json.Unmarshal(b, &raw); err != nil {
 		return nil, err
 	}
-	return l, nil
+	// Normalize keys once at load time so Derive doesn't need to.
+	normalized := make(Lookup, len(raw))
+	for k, v := range raw {
+		normalized[normalizeName(k)] = v
+	}
+	return normalized, nil
 }
 
 // Derive returns the derived fields for a car name, or zero values + false
-// if the model token isn't in the lookup.
+// if no lookup key is contained in the name. Longest match wins, so "xuv700"
+// beats "xuv" for a name like "Mahindra XUV700 AXE".
 func (l Lookup) Derive(name string) (Derived, bool) {
-	lower := strings.ToLower(name)
-	// Match the longest key that appears in the name — "xuv700" beats "xuv".
+	normalized := normalizeName(name)
+
 	var best string
-	for k := range l {
-		if strings.Contains(lower, k) && len(k) > len(best) {
+	var bestVal Derived
+	for k, v := range l {
+		// k is already normalized by LoadLookup.
+		if strings.Contains(normalized, k) && len(k) > len(best) {
 			best = k
+			bestVal = v
 		}
 	}
 	if best == "" {
 		return Derived{}, false
 	}
-	return l[best], true
+	return bestVal, true
 }

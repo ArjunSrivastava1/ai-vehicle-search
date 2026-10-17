@@ -8,6 +8,24 @@ import (
 	"strings"
 )
 
+// normalize lowercases and trims a categorical string so query-time
+// comparisons (COLLATE NOCASE) always match.
+func normalize(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// parseSeats handles the CSV seats column, which might be empty or "5.0".
+func parseSeats(s string) (int, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return int(f), true
+	}
+	return 0, false
+}
+
 func LoadCSV(d *sql.DB, csvPath, lookupPath string) (loaded, unresolved int, err error) {
 	lookup, err := LoadLookup(lookupPath)
 	if err != nil {
@@ -21,7 +39,7 @@ func LoadCSV(d *sql.DB, csvPath, lookupPath string) (loaded, unresolved int, err
 	defer f.Close()
 
 	r := csv.NewReader(f)
-	r.FieldsPerRecord = -1 // tolerate ragged rows
+	r.FieldsPerRecord = -1
 	rows, err := r.ReadAll()
 	if err != nil {
 		return 0, 0, err
@@ -53,25 +71,64 @@ func LoadCSV(d *sql.DB, csvPath, lookupPath string) (loaded, unresolved int, err
 		price, _ := strconv.Atoi(get(row, header, "selling_price"))
 		km, _ := strconv.Atoi(get(row, header, "km_driven"))
 
-		var bodyType, source sql.NullString
-		var seats, safety sql.NullInt64
-		if d, ok := lookup.Derive(name); ok {
-			bodyType = sql.NullString{String: d.BodyType, Valid: true}
-			seats = sql.NullInt64{Int64: int64(d.Seats), Valid: true}
-			safety = sql.NullInt64{Int64: int64(d.SafetyRating), Valid: true}
-			source = sql.NullString{String: "lookup", Valid: true}
-		} else {
-			source = sql.NullString{String: "unresolved", Valid: true}
+		fuel := normalize(get(row, header, "fuel"))
+		trans := normalize(get(row, header, "transmission"))
+		seller := get(row, header, "seller_type")
+		owner := normalize(get(row, header, "owner"))
+
+		var bodyType string
+		var seats, safety int
+		haveBody, haveSeats, haveSafety := false, false, false
+
+		// 1. Try CSV seats
+		if s, ok := parseSeats(get(row, header, "seats")); ok && s > 0 {
+			seats = s
+			haveSeats = true
+		}
+
+		// 2. Try lookup for body_type, safety, and (if CSV didn't have) seats
+		src := "unresolved"
+		if derived, ok := lookup.Derive(name); ok {
+			bodyType = normalize(derived.BodyType)
+			haveBody = true
+			if !haveSeats && derived.Seats > 0 {
+				seats = derived.Seats
+				haveSeats = true
+			}
+			if derived.SafetyRating > 0 {
+				safety = derived.SafetyRating
+				haveSafety = true
+			}
+			if haveSeats && haveBody && haveSafety {
+				src = "csv+lookup"
+			} else {
+				src = "lookup"
+			}
+		} else if haveSeats {
+			src = "csv"
+		}
+
+		if src == "unresolved" {
 			unresolved++
 		}
 
+		var bodyVal, sourceVal sql.NullString
+		var seatsVal, safetyVal sql.NullInt64
+		if haveBody {
+			bodyVal = sql.NullString{String: bodyType, Valid: true}
+		}
+		if haveSeats {
+			seatsVal = sql.NullInt64{Int64: int64(seats), Valid: true}
+		}
+		if haveSafety {
+			safetyVal = sql.NullInt64{Int64: int64(safety), Valid: true}
+		}
+		sourceVal = sql.NullString{String: src, Valid: true}
+
 		if _, err := stmt.Exec(
 			name, year, price, km,
-			get(row, header, "fuel"),
-			get(row, header, "seller_type"),
-			get(row, header, "transmission"),
-			get(row, header, "owner"),
-			bodyType, seats, safety, source,
+			fuel, seller, trans, owner,
+			bodyVal, seatsVal, safetyVal, sourceVal,
 		); err != nil {
 			return 0, 0, err
 		}

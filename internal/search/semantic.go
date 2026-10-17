@@ -1,28 +1,69 @@
 package search
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var client *http.Client
-var apiKey string
+var serviceURL string
+
+// GetServiceURL returns the embedding service URL
+func GetServiceURL() string {
+	return serviceURL
+}
 
 func init() {
-	client = &http.Client{}
-	apiKey = os.Getenv("OPENAI_API_KEY")
+	timeout := 30 * time.Second
+	if v := os.Getenv("EMBEDDING_SERVICE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			timeout = d
+		} else if ms, err := strconv.Atoi(v); err == nil {
+			timeout = time.Duration(ms) * time.Millisecond
+		}
+	}
+
+	client = &http.Client{
+		Timeout: timeout,
+	}
+
+	serviceURL = os.Getenv("EMBEDDING_SERVICE_URL")
+	if serviceURL == "" {
+		hostname := os.Getenv("HOSTNAME")
+		if hostname == "" {
+			hostname = "localhost"
+		}
+		serviceURL = fmt.Sprintf("http://%s:3001", hostname)
+	}
+}
+
+// SemanticScoreRequest represents the request to the embedding service
+type SemanticScoreRequest struct {
+	Query   string  `json:"query"`
+	Vehicle Vehicle `json:"vehicle"`
+}
+
+// SemanticScoreResponse represents the response from the embedding service
+type SemanticScoreResponse struct {
+	Query      string         `json:"query"`
+	Vehicle    map[string]any `json:"vehicle"`
+	Similarity float64        `json:"similarity"`
+	Error      string         `json:"error,omitempty"`
 }
 
 // SemanticScore returns a 0-1 score of how well the vehicle matches the query.
-// Uses OpenAI-compatible LLM API to score based on natural language description.
+// Calls the embedding service (Python service with HuggingFace model) to compute cosine similarity.
 func SemanticScore(v Vehicle, q string) (float64, error) {
-	if apiKey == "" {
-		return 0.5, nil // neutral score if no API key
+	if serviceURL == "" {
+		return 0.5, fmt.Errorf("embedding service URL not configured")
 	}
 
 	// Extract key entities from query using regex
@@ -31,59 +72,58 @@ func SemanticScore(v Vehicle, q string) (float64, error) {
 	// Build prompt with vehicle details and extracted query features
 	prompt := buildSemanticPrompt(v, matches)
 
-	body := map[string]any{
-		"model":         "gpt-4o-mini",
-		"messages": []map[string]any{
-			{
-				"role":    "system",
-				"content": "You are a car matching assistant. Return only a single float number between 0 and 1, nothing else.",
-			},
-			{
-				"role": "user",
-				"content": prompt,
-			},
-		},
-		"temperature": 0.0,
+	// Prepare vehicle data for the service
+	vehicleData := map[string]any{
+		"name":          v.Name,
+		"year":          v.Year,
+		"price":         v.SellingPrice,
+		"fuel":          v.Fuel,
+		"transmission":  v.Transmission,
+		"body_type":     v.BodyType,
+		"seats":         v.Seats,
+		"safety_rating": v.SafetyRating,
 	}
 
-	req, err := json.Marshal(body)
+	// Create the request payload
+	body := map[string]any{
+		"query":   q,
+		"vehicle": vehicleData,
+		"prompt":  prompt,
+	}
+
+	reqJSON, err := json.Marshal(body)
 	if err != nil {
 		return 0.5, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	reqStr := string(req)
-
-	url := os.Getenv("OPENAI_API_URL")
-	if url == "" {
-		url = "https://api.openai.com/v1/chat/completions"
-	}
-
-	resp, err := client.Post(url, "application/json", strings.NewReader(reqStr))
+	resp, err := client.Post(serviceURL+"/similar", "application/json", bytes.NewReader(reqJSON))
 	if err != nil {
-		return 0.5, fmt.Errorf("failed to call LLM: %w", err)
+		return 0.5, fmt.Errorf("failed to call embedding service: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0.5, fmt.Errorf("LLM returned status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return 0.5, fmt.Errorf("embedding service returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var llmResp struct {
-		Choice struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choice"`
+	var serviceResp SemanticScoreResponse
+	if err := json.NewDecoder(resp.Body).Decode(&serviceResp); err != nil {
+		return 0.5, fmt.Errorf("failed to decode embedding service response: %w", err)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&llmResp); err != nil {
-		return 0.5, fmt.Errorf("failed to decode LLM response: %w", err)
+	// Check for errors from the service
+	if serviceResp.Error != "" {
+		return 0.5, fmt.Errorf("embedding service error: %s", serviceResp.Error)
 	}
 
-	// Parse the float score from response
-	score := parseScore(llmResp.Choice.Message.Content)
-	if score < 0 || score > 1 {
-		score = 0.5 // clamp to valid range
+	// Clamp similarity to valid range [0, 1]
+	score := serviceResp.Similarity
+	if score < 0 {
+		score = 0
+	}
+	if score > 1 {
+		score = 1
 	}
 
 	return score, nil
@@ -93,22 +133,47 @@ func extractQueryFeatures(q string) map[string]string {
 	features := make(map[string]string)
 
 	// Extract price range
-	priceRegex := regexp.MustCompile(`(under|below|less than)\s*([\\d,]+)(?:\s*(?:lakh|lakhs|k|thousand|cr))?`)
+	priceRegex := regexp.MustCompile(`(?i)(under|below|less than)\s*([\d,]+)(?:\s*(lakh|lakhs|lac|lacs|cr|crore|k|thousand))?`)
 	priceMatches := priceRegex.FindStringSubmatch(q)
 	if len(priceMatches) >= 3 {
 		price := strings.ReplaceAll(priceMatches[2], ",", "")
-		priceVal, _ := strconv.ParseFloat(price, 64)
-		if priceVal > 0 {
-			features["price_max"] = fmt.Sprintf("%d", priceVal*100000) // convert lakhs to rupees
+		priceVal, err := strconv.ParseFloat(price, 64)
+		if err != nil || priceVal <= 0 {
+			// fall through; no price extracted
+		} else {
+			unit := ""
+			if len(priceMatches) >= 4 {
+				unit = strings.ToLower(priceMatches[3])
+			}
+			var multiplier float64
+			switch unit {
+			case "cr", "crore", "crores":
+				multiplier = 1e7
+			case "lakh", "lakhs", "lac", "lacs":
+				multiplier = 1e5
+			case "k", "thousand":
+				multiplier = 1e3
+			default:
+				// No unit given. Could be raw rupees or "lakh" implied
+				// by convention — but don't guess 1e5 blindly.
+				multiplier = 1
+			}
+			features["price_max"] = fmt.Sprintf("%.0f", priceVal*multiplier)
 		}
 	}
 
 	// Extract year range
-	yearRegex := regexp.MustCompile(`(new|recent|latest|from\s*([\\d]{4})\s*to?\s*([\\d]{4}))`)
+	// Extract year range
+	yearRegex := regexp.MustCompile(`(?i)(?:from\s*)?(\d{4})(?:\s*(?:to|-)\s*(\d{4}))?`)
 	yearMatches := yearRegex.FindStringSubmatch(q)
+	if len(yearMatches) >= 2 && yearMatches[1] != "" {
+		if year, err := strconv.Atoi(yearMatches[1]); err == nil {
+			features["year_min"] = strconv.Itoa(year)
+		}
+	}
 	if len(yearMatches) >= 3 && yearMatches[2] != "" {
 		if year, err := strconv.Atoi(yearMatches[2]); err == nil {
-			features["year_min"] = strconv.Itoa(year)
+			features["year_max"] = strconv.Itoa(year)
 		}
 	}
 
@@ -143,20 +208,20 @@ func extractQueryFeatures(q string) map[string]string {
 	}
 
 	// Extract safety rating
-	safetyRegex := regexp.MustCompile(`(?i)safety\s*(rating|score)\s*(?:[:/ ]|\d+/\d+)`)
-	safetyMatches := safetyRegex.FindStringSubmatch(q)
-	if len(safetyMatches) >= 1 {
-		safetyStr := strings.TrimSpace(safetyMatches[1])
-		// Handle "4/5 stars" format
-		if strings.Contains(safetyStr, "/") {
-			parts := strings.Split(safetyStr, "/")
-			if len(parts) == 2 {
-				if num, err := strconv.Atoi(strings.TrimSpace(parts[0])); err == nil {
-					features["safety_rating_min"] = strconv.Itoa(num)
-				}
+	// Extract safety rating — supports "5 star safety", "5 stars", "safety 4",
+	// "safety rating 5", "safety rating 4/5", "rated 4 stars".
+	safetyPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(\d)\s*(?:/5|stars?)\s*safety`),                            // "5 star safety"
+		regexp.MustCompile(`(?i)safety\s*(?:rating|score)?\s*(?:of\s*)?(\d)(?:\s*/\s*5)?`), // "safety 4", "safety rating 5/5"
+		regexp.MustCompile(`(?i)rated\s*(\d)\s*(?:stars?|/5)`),                             // "rated 4 stars"
+		regexp.MustCompile(`(?i)(\d)\s*stars?`),                                            // fallback: "5 stars"
+	}
+	for _, re := range safetyPatterns {
+		if m := re.FindStringSubmatch(q); len(m) >= 2 {
+			if n, err := strconv.Atoi(m[1]); err == nil && n >= 1 && n <= 5 {
+				features["safety_rating_min"] = strconv.Itoa(n)
+				break
 			}
-		} else if num, err := strconv.Atoi(safetyStr); err == nil {
-			features["safety_rating_min"] = strconv.Itoa(num)
 		}
 	}
 
@@ -168,83 +233,81 @@ func extractQueryFeatures(q string) map[string]string {
 	return features
 }
 
-func buildSemanticPrompt(v Vehicle, features map[string]string) string {
-	var sb strings.Builder
+// buildSemanticPrompt constructs a prompt string combining vehicle details with extracted query features.
+// The prompt is used by the embedding service to generate semantically similar vehicles.
+func buildSemanticPrompt(v Vehicle, matches map[string]string) string {
+	// Build vehicle description
+	var parts []string
+	parts = append(parts, fmt.Sprintf("Vehicle: %s, Year: %d, Price: ₹%d, Fuel: %s, Transmission: %s, Body Type: %s, Seats: %d, Safety Rating: %d",
+		v.Name, v.Year, v.SellingPrice, v.Fuel, v.Transmission, v.BodyType, v.Seats, v.SafetyRating))
 
-	sb.WriteString("Given this car and a user's text query, score how well they match on a scale from 0 (no match) to 1 (perfect match).\n\n")
+	// Add extracted query features
+	if price, ok := matches["price_max"]; ok {
+		parts = append(parts, fmt.Sprintf("User wants cars under ₹%s", price))
+	}
+	if year, ok := matches["year_min"]; ok {
+		parts = append(parts, fmt.Sprintf("User wants cars from year %s", year))
+	}
+	if bodyType, ok := matches["body_type"]; ok {
+		parts = append(parts, fmt.Sprintf("User wants %s cars", bodyType))
+	}
+	if fuel, ok := matches["fuel"]; ok {
+		parts = append(parts, fmt.Sprintf("User wants %s cars", fuel))
+	}
+	if transmission, ok := matches["transmission"]; ok {
+		parts = append(parts, fmt.Sprintf("User wants %s cars", transmission))
+	}
+	if seats, ok := matches["seats_min"]; ok {
+		parts = append(parts, fmt.Sprintf("User wants cars with at least %d seats", seats))
+	}
+	if safety, ok := matches["safety_rating_min"]; ok {
+		parts = append(parts, fmt.Sprintf("User wants cars with at least %d stars safety rating", safety))
+	}
 
-	sb.WriteString("Car details:\n")
-	sb.WriteString(fmt.Sprintf("- Name: %s\n", v.Name))
-	sb.WriteString(fmt.Sprintf("- Year: %d\n", v.Year))
-	sb.WriteString(fmt.Sprintf("- Price: ₹%d\n", v.SellingPrice))
-	sb.WriteString(fmt.Sprintf("- Fuel: %s\n", v.Fuel))
-	sb.WriteString(fmt.Sprintf("- Transmission: %s\n", v.Transmission))
-	sb.WriteString(fmt.Sprintf("- Body Type: %s\n", v.BodyType))
-	sb.WriteString(fmt.Sprintf("- Seats: %d\n", v.Seats))
-	sb.WriteString(fmt.Sprintf("- Safety Rating: %d\n", v.SafetyRating))
-
-	sb.WriteString("\nUser query: ")
-	sb.WriteString(v.Name)
-	sb.WriteString(" ")
-	sb.WriteString(features["query"])
-
-	sb.WriteString("\n\n\nMatch the car to the query based on: " + buildMatchCriteria(features) + "\n")
-	sb.WriteString("Return ONLY a single float number (0.0 to 1.0), nothing else.")
-
-	return sb.String()
+	return strings.Join(parts, ". ")
 }
 
-func buildMatchCriteria(features map[string]string) string {
-	criteria := make([]string, 0, len(features))
+// The embedding service now handles semantic scoring via cosine similarity.
+// This function and parseScore are no longer used - replaced by direct API call to embedding service.
 
-	for key, value := range features {
-		if value == "" {
-			continue
-		}
-		criteria = append(criteria, fmt.Sprintf("- %s must be %s", key, value))
-	}
+func ParseQuery(q string) Filter {
+	f := Filter{}
+	feats := extractQueryFeatures(q)
 
-	return strings.Join(criteria, ", ")
-}
-
-func parseScore(content string) float64 {
-	// Try to extract float from response
-	re := regexp.MustCompile(`(-?[\d,]+\.?\d*)`)
-	matches := re.FindString(content)
-
-	if matches != "" {
-		// Clean the number (remove commas)
-		cleaned := strings.ReplaceAll(matches, ",", "")
-		if num, err := strconv.ParseFloat(cleaned, 64); err == nil {
-			return num
+	if v, ok := feats["price_max"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.PriceMax = &n
 		}
 	}
+	if v, ok := feats["transmission"]; ok {
+		f.Transmission = v
+	}
+	if v, ok := feats["body_type"]; ok {
+		f.BodyType = v
+	}
+	if v, ok := feats["fuel"]; ok {
+		f.Fuel = v
+	}
+	if v, ok := feats["seats_min"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.SeatsMin = &n
+		}
+	}
+	if v, ok := feats["safety_rating_min"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.SafetyMin = &n
+		}
+	}
+	if v, ok := feats["year_min"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.YearMin = &n
+		}
+	}
+	if v, ok := feats["year_max"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.YearMax = &n
+		}
+	}
 
-	// Fallback: check for common score representations
-	lowerContent := strings.ToLower(content)
-
-	if strings.Contains(lowerContent, "1") && !strings.Contains(lowerContent, "0") {
-		return 1.0
-	}
-	if strings.Contains(lowerContent, "0") && !strings.Contains(lowerContent, "1") {
-		return 0.0
-	}
-	if strings.Contains(lowerContent, "yes") {
-		return 1.0
-	}
-	if strings.Contains(lowerContent, "no") {
-		return 0.0
-	}
-	if strings.Contains(lowerContent, "perfect") || strings.Contains(lowerContent, "excellent") || strings.Contains(lowerContent, "great") {
-		return 0.9
-	}
-	if strings.Contains(lowerContent, "close") || strings.Contains(lowerContent, "somewhat") {
-		return 0.6
-	}
-	if strings.Contains(lowerContent, "not") {
-		return 0.3
-	}
-
-	// Default to 0.5 if we can't parse
-	return 0.5
+	return f
 }
