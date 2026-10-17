@@ -197,8 +197,8 @@ Fetch a single vehicle by ID. Returns `404` if not found.
 
 ```bash
 # 1. Clone the repo
-git clone <your-repo-url>
-cd ai_vehicle_search
+git clone https://github.com/ArjunSrivastava1/ai-vehicle-search.git cars24-test
+cd cars24-test
 
 # 2. Install Python dependencies
 uv venv service.venv
@@ -211,11 +211,44 @@ go run ./cmd/server
 
 First startup takes 2–5 minutes (model download + CSV ingest). Subsequent startups take ~15 seconds (model loads from cache).
 
+[The model is linked for its HF repository here.](https://huggingface.co/google/embeddinggemma-2)
+
+> [!NOTE] 
+> As model size is ~1.4 GB, the download will continue despite the go program timing out and progress bar will  be there, so please close the server once its completed and simply restart in a new terminal(including activating the venv), or download the model prior to usage via the link provided.
+> Once cached and loaded in the system, it will be as fast as shown in the walkthrough
+
 The server listens on `:3000`. The embedding service is spawned automatically on `:3001`.
+
+The commands, as tested and used in the walkthrough are as follows, further in the walkthrough, a directory name that was cloned to is cars24-test:
+```bash
+#health check
+curl -s http://localhost:3000/health | jq
+
+# Structured filter (no semantic scoring)
+curl -s -X POST http://localhost:3000/search/filter \
+  -H 'Content-Type: application/json' \
+  -d '{"body_type":"SUV","transmission":"automatic"}' | jq '{count, top: (.results[0:3] | map({name, transmission, body_type}))}'
+
+# all five constraint types
+curl -s -X POST http://localhost:3000/search/semantic \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"automatic 7 seater SUV under 20 lakh from 2018"}' | jq
+
+for q in "SUV" "diesel hatchback under 5 lakh" "5 star safety SUV" "petrol manual hatchback under 4 lakh" "maruti swift"; do
+  echo "=== $q ==="
+  curl -s -X POST http://localhost:3000/search/semantic \
+    -H 'Content-Type: application/json' \
+    -d "{\"query\":\"$q\"}" | jq '{count, top: (.results[0:2] | map(.name))}'
+done
+```
 
 ## Data
 
-The dataset is `data/car_details_v3.csv` — the Kaggle Car Price Prediction dataset (8128 rows). It's committed to the repo, so no external download is needed. To regenerate the SQLite database from scratch:
+The dataset is `data/car_details_v3.csv` — the Kaggle Vehicle dataset (8128 rows) is publically sourced. It's committed to the repo, so no external download is needed.
+[Link of the dataset on the web](https://www.kaggle.com/datasets/nehalbirla/vehicle-dataset-from-cardekho)
+The dataset has multiple files, of which, car details v3 was chosen and renamed; already present in the project files therefore, once again please do not re download.
+
+To regenerate the SQLite database from scratch:
 
 ```bash
 rm cars.db
@@ -236,20 +269,10 @@ Environment variables (all optional):
 | `EMBEDDING_MODEL` | `google/embeddinggemma-2` | HuggingFace model ID |
 | `EMBEDDING_SERVICE_PORT` | `3001` | Python service port |
 
-## Performance
-
-Measured on an M2 Mac Mini (MPS):
-
-| Query type | Candidates | Time |
-| --- | --- | --- |
-| Broad ("SUV") | 100 (capped) | ~3.8s |
-| Specific ("automatic 7 seater SUV under 20 lakh from 2018") | 2 | ~0.3s |
-
-The bottleneck is the semantic scoring call: ~260ms per vehicle, dominated by HTTP and tokenization overhead rather than the model forward pass. Semantic scoring is parallelized 8-way in Go with a bounded worker pool, giving a ~7× speedup over sequential scoring. The Python service serializes model calls behind an inference lock (PyTorch/MPS is not reliably thread-safe).
 
 ## Design
 
-See `DESIGN.md` for the engineering rationale — why regex for parsing, why hybrid ranking, why Go + Python, and what I'd change at scale.
+See `DESIGN.md` for the engineering rationale: why regex for parsing, why hybrid ranking, why Go + Python, and what I'd change at scale.
 
 Short version:
 
