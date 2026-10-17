@@ -307,6 +307,8 @@ Google. Chosen because:
 - Strong on short-text semantic similarity.
 - Doesn't require an API key or network dependency at inference time.
 
+gemma 2 embeddings model also ensures that for features such as voice searches, models dont have to be changed, since its a multimodal embeddings model, thus, it ensures simplicity and flexibility for additions.
+
 Alternatives considered: OpenAI's `text-embedding-3-small` (fast, cheap, but
 requires network), `sentence-transformers/all-MiniLM-L6-v2` (smaller, faster,
 weaker on automotive domain). Gemma-2 won on the "runs locally + good enough"
@@ -482,56 +484,9 @@ GROUP BY name, year, selling_price, km_driven, fuel, transmission,
          seller_type, owner, body_type, seats, safety_rating
 ```
 
-`MIN(id)` is arbitrary but stable — the deduplicated result has a valid ID.
+`MIN(id)` is arbitrary but stable as the deduplicated result has a valid ID.
 
 ---
-
-## 9. What I'd change at scale
-
-### Batch endpoint
-
-The biggest architectural improvement. Current: N HTTP calls, one per candidate.
-Better: one call with `{query, vehicles: [...]}`, Python embeds the query once
-and dot-products all candidates. Would drop broad-query latency from 3.8s to
-~200ms. The reason I didn't build it: time, and the current latency is acceptable
-for the assignment scope. The reason I'd build it next: it's the difference
-between "usable" and "snappy."
-
-### Vector index
-
-Once you have precomputed vehicle embeddings (embed at ingest), similarity search
-becomes a matrix-vector product. At 8128 rows, that's microseconds. At
-millions of rows, you need an ANN index (FAISS, pgvector). The current
-architecture (embed at query time) doesn't allow this because embeddings aren't
-precomputed. Fixing that unlocks real-time search at scale.
-
-### LLM-assisted parsing
-
-Regex handles the common cases. LLM would handle the rest. The hybrid approach:
-regex first, LLM fallback when regex extracts nothing but the query looks
-constraint-like. This preserves determinism for the 95% of queries that regex
-handles, and adds coverage for the 5% it doesn't. Seams are in place
-(`ParseQuery` is a single function).
-
-### Query embedding cache
-
-20-line change, halves broad-query latency for repeat queries. Trivial to add,
-worth doing.
-
-### Normalization at ingest
-
-Case, whitespace, AMT/Automatic merging — currently handled at query time with
-`COLLATE NOCASE` and special cases in `fetch`. Cleaner to normalize once at
-ingest, then trust the data. Minor code cleanup, not urgent.
-
-### Metrics and observability
-
-No timing, no error rates, no query logs. For a demo, fine. For production,
-you want to know: what fraction of queries extract zero constraints (indicates
-parser gaps), what's the p50/p99 latency, what's the embedding service error rate.
-Adding structured logging and a Prometheus endpoint would take an hour and give
-you visibility you can't get today.
-
 ### Tests
 
 There are no unit tests. For a system this size, that's a real gap. Priority
